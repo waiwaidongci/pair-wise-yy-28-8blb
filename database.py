@@ -11,6 +11,10 @@ class DomainError(ValueError):
     """Business rule violation."""
 
 
+class VersionConflict(DomainError):
+    """Submitted version is stale: another terminal committed first."""
+
+
 ELEMENT_KINDS = {"character", "costume", "prop", "injury"}
 RULES = {"stable", "monotonic", "allowed"}
 
@@ -22,6 +26,7 @@ class ContinuityDB:
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys=ON")
+        self.conn.execute("PRAGMA busy_timeout=5000")
         if path != ":memory:":
             self.conn.execute("PRAGMA journal_mode=WAL")
         self._schema()
@@ -115,6 +120,7 @@ class ContinuityDB:
               detail TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','exempted','resolved')),
               active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+              invalidated_at TEXT,
               fingerprint TEXT NOT NULL UNIQUE,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -132,7 +138,8 @@ class ContinuityDB:
               reviewed_by INTEGER REFERENCES users(id),
               review_note TEXT NOT NULL DEFAULT '',
               proposed_at TEXT NOT NULL,
-              reviewed_at TEXT
+              reviewed_at TEXT,
+              invalidated_at TEXT
             );
             CREATE TABLE IF NOT EXISTS exemptions (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -141,8 +148,24 @@ class ContinuityDB:
               approved_by INTEGER NOT NULL REFERENCES users(id),
               approved_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS idempotent_requests (
+              request_id TEXT NOT NULL,
+              endpoint TEXT NOT NULL,
+              status_code INTEGER NOT NULL,
+              response TEXT NOT NULL,
+              attempt INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(request_id,endpoint)
+            );
             """
         )
+        # Migrate databases created before conflicts/plans carried invalidation markers.
+        for table, column in (("conflicts", "invalidated_at TEXT"),
+                              ("adjustment_plans", "invalidated_at TEXT")):
+            cols = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if column.split()[0] not in cols:
+                self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column}")
         self.conn.commit()
 
     def seed_demo(self) -> None:
@@ -287,6 +310,146 @@ class ContinuityDB:
             self._sync_conflicts(shot["scene_id"])
         return {"shot_id": shot_id, "element_id": element_id, "conflicts": self.list_conflicts(shot["scene_id"])}
 
+    @staticmethod
+    def _neighbor_map(order: list[int]) -> dict[int, tuple[int | None, int | None]]:
+        """Directed (predecessor, successor) of each shot along the narrative chain."""
+        return {shot_id: (order[i - 1] if i > 0 else None,
+                          order[i + 1] if i + 1 < len(order) else None)
+                for i, shot_id in enumerate(order)}
+
+    def reorder_shot(self, shot_id: int, narrative_order: int, expected_version: int | None,
+                     user_id: int, request_id: str) -> dict:
+        """Move an unlocked shot to a new narrative position.
+
+        The client must submit the shot version it saw when opening the editor
+        (optimistic locking). Conflicts are recomputed for the new narrative
+        chain; conflicts whose shot pairs disappear and their adjustment plans
+        are invalidated, and locks on affected shots are reopened. The whole
+        change is one atomic unit keyed by request_id, so a failed write can be
+        retried with the same request number without leaving a partial result.
+        """
+        if not str(request_id).strip():
+            raise DomainError("必须提供请求编号 request_id，失败重试需沿用同一编号")
+        if expected_version is None:
+            raise DomainError("必须提交打开编辑时看到的镜头版本号 expected_version")
+        shot = self.conn.execute(
+            "SELECT s.*,sc.production_id FROM shots s JOIN scenes sc ON sc.id=s.scene_id WHERE s.id=?", (shot_id,)
+        ).fetchone()
+        if not shot:
+            raise DomainError("镜头不存在")
+        user = self._production_for_user(shot["production_id"], user_id)
+        if user["role"] not in {"producer", "continuity"}:
+            raise DomainError("无权调整叙事顺序")
+        scene_id = shot["scene_id"]
+        now = datetime.now().isoformat()
+        with self.transaction():
+            cached = self.conn.execute(
+                "SELECT * FROM idempotent_requests WHERE request_id=? AND endpoint='shot_reorder'",
+                (str(request_id).strip(),),
+            ).fetchone()
+            if cached:
+                payload = json.loads(cached["response"])
+                if payload.get("shot_id") != shot_id:
+                    raise DomainError("请求编号已用于其他操作，不能复用")
+                self.conn.execute(
+                    "UPDATE idempotent_requests SET attempt=attempt+1,updated_at=? WHERE request_id=? AND endpoint='shot_reorder'",
+                    (now, str(request_id).strip()),
+                )
+                return {**payload, "retried": True, "attempt": cached["attempt"] + 1}
+
+            current = self.conn.execute("SELECT * FROM shots WHERE id=?", (shot_id,)).fetchone()
+            if current["version"] != int(expected_version):
+                raise VersionConflict(
+                    f"版本冲突：镜头 {current['shot_code']} 已被其他终端修改"
+                    f"（你打开时版本 {expected_version}，当前版本 {current['version']}），请刷新后重试"
+                )
+            if current["status"] == "locked":
+                raise DomainError("镜头已锁定，不能调整叙事位置；位置变化会使旧锁定结论失效")
+            rows = self.conn.execute(
+                "SELECT id,narrative_order,status FROM shots WHERE scene_id=? ORDER BY narrative_order,id", (scene_id,)
+            ).fetchall()
+            if not (1 <= int(narrative_order) <= len(rows)):
+                raise DomainError(f"叙事位置必须在 1 到 {len(rows)} 之间")
+            old_order = [r["id"] for r in rows]
+            target = int(narrative_order) - 1
+            new_order = old_order.copy()
+            new_order.remove(shot_id)
+            new_order.insert(target, shot_id)
+            if new_order == old_order:
+                raise DomainError("叙事位置没有变化，无需提交")
+
+            old_neighbors, new_neighbors = self._neighbor_map(old_order), self._neighbor_map(new_order)
+            affected = {sid for sid in new_order if old_neighbors.get(sid) != new_neighbors.get(sid)}
+
+            # Reassign in two passes with a positive offset: assigning 1..n
+            # directly would trip UNIQUE(scene_id,narrative_order), and the
+            # CHECK(narrative_order>0) forbids a negative intermediate range.
+            offset = len(new_order)
+            for position, sid in enumerate(new_order, start=1):
+                self.conn.execute("UPDATE shots SET narrative_order=? WHERE id=?", (offset + position, sid))
+            for position, sid in enumerate(new_order, start=1):
+                self.conn.execute("UPDATE shots SET narrative_order=? WHERE id=?", (position, sid))
+            unlocked = [r[0] for r in self.conn.execute(
+                "UPDATE shots SET status='planned',updated_by=?,updated_at=? "
+                "WHERE scene_id=? AND status='locked' AND id IN (%s) RETURNING id"
+                % ",".join("?" * len(affected)),
+                (user_id, now, scene_id, *sorted(affected)),
+            ).fetchall()]
+            # Any shot in the scene gets a new version so concurrent editors on
+            # neighboring shots also fence each other.
+            self.conn.execute(
+                "UPDATE shots SET version=version+1,updated_by=?,updated_at=? WHERE scene_id=?",
+                (user_id, now, scene_id),
+            )
+
+            kept_pairs = set(zip(new_order, new_order[1:]))
+            invalid_conflicts = [
+                r["id"] for r in self.conn.execute(
+                    "SELECT id,from_shot_id,to_shot_id FROM conflicts "
+                    "WHERE scene_id=? AND active=1 AND invalidated_at IS NULL", (scene_id,)
+                ).fetchall()
+                if (r["from_shot_id"], r["to_shot_id"]) not in kept_pairs
+            ]
+            invalid_plans: list[int] = []
+            if invalid_conflicts:
+                placeholders = ",".join("?" * len(invalid_conflicts))
+                self.conn.execute(
+                    f"UPDATE conflicts SET active=0,status='resolved',invalidated_at=?,updated_at=? "
+                    f"WHERE id IN ({placeholders})",
+                    (now, now, *invalid_conflicts),
+                )
+                invalid_plans = [r[0] for r in self.conn.execute(
+                    f"UPDATE adjustment_plans SET invalidated_at=? "
+                    f"WHERE invalidated_at IS NULL AND status IN ('pending','approved') "
+                    f"AND conflict_id IN ({placeholders}) RETURNING id",
+                    (now, *invalid_conflicts),
+                ).fetchall()]
+
+            self._sync_conflicts(scene_id)
+            result = {
+                "shot_id": shot_id,
+                "scene_id": scene_id,
+                "version": self.conn.execute("SELECT version FROM shots WHERE id=?", (shot_id,)).fetchone()[0],
+                "narrative_order": [dict(r) for r in self.conn.execute(
+                    "SELECT id AS shot_id,shot_code,narrative_order,status,version FROM shots "
+                    "WHERE scene_id=? ORDER BY narrative_order", (scene_id,)
+                ).fetchall()],
+                "affected_shot_ids": sorted(affected),
+                "unlocked_shot_ids": sorted(unlocked),
+                "invalidated_conflict_ids": invalid_conflicts,
+                "invalidated_plan_ids": invalid_plans,
+                "retried": False,
+                "attempt": 1,
+                "request_id": str(request_id).strip(),
+                "conflicts": self.list_conflicts(scene_id),
+            }
+            self.conn.execute(
+                "INSERT INTO idempotent_requests(request_id,endpoint,status_code,response,attempt,created_at,updated_at) "
+                "VALUES(?, 'shot_reorder', 200, ?, 1, ?, ?)",
+                (str(request_id).strip(), json.dumps(result, ensure_ascii=False), now, now),
+            )
+        return result
+
     def _detect_conflicts(self, scene_id: int) -> list[dict]:
         scene = self.conn.execute("SELECT * FROM scenes WHERE id=?", (scene_id,)).fetchone()
         if not scene:
@@ -349,7 +512,7 @@ class ContinuityDB:
             if existing:
                 status = "exempted" if existing["status"] == "exempted" else "open"
                 self.conn.execute(
-                    "UPDATE conflicts SET active=1,status=?,detail=?,updated_at=? WHERE id=?",
+                    "UPDATE conflicts SET active=1,status=?,detail=?,invalidated_at=NULL,updated_at=? WHERE id=?",
                     (status, issue["detail"], datetime.now().isoformat(), existing["id"]),
                 )
             else:
@@ -410,6 +573,8 @@ class ContinuityDB:
         plan = self.conn.execute("SELECT * FROM adjustment_plans WHERE id=?", (plan_id,)).fetchone()
         if not plan or plan["status"] != "pending":
             raise DomainError("调整方案不存在或已审核")
+        if plan["invalidated_at"]:
+            raise DomainError("调整方案已随叙事顺序变化失效，请基于新冲突重新提出方案")
         if plan["proposed_by"] == reviewer_id:
             raise DomainError("提案人不能审核自己的方案")
         shot = self.conn.execute("SELECT * FROM shots WHERE id=?", (plan["shot_id"],)).fetchone()
@@ -482,12 +647,19 @@ class ContinuityDB:
             shots = [dict(r) for r in self.conn.execute("SELECT * FROM shots WHERE scene_id=? ORDER BY narrative_order", (scene["id"],))]
             conflicts = self.list_conflicts(scene["id"], include_resolved=True)
             scenes.append({**dict(scene), "shots": shots, "conflicts": conflicts})
+        plans = [dict(r) for r in self.conn.execute(
+            "SELECT p.*,c.scene_id,CASE WHEN p.invalidated_at IS NULL THEN 0 ELSE 1 END AS invalidated "
+            "FROM adjustment_plans p JOIN conflicts c ON c.id=p.conflict_id "
+            "JOIN scenes s ON s.id=c.scene_id WHERE s.production_id=? ORDER BY p.id", (production_id,)
+        ).fetchall()]
         return {
             "production": dict(production),
             "elements": [dict(r) for r in self.conn.execute("SELECT * FROM elements WHERE production_id=? ORDER BY id", (production_id,))],
             "scenes": scenes,
+            "plans": plans,
             "open_conflicts": sum(1 for scene in scenes for c in scene["conflicts"] if c["active"] and c["status"] == "open"),
             "exempted_conflicts": sum(1 for scene in scenes for c in scene["conflicts"] if c["active"] and c["status"] == "exempted"),
+            "invalidated_plans": sum(1 for p in plans if p["invalidated"]),
         }
 
     def snapshot(self) -> dict:

@@ -1,1 +1,67 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>影视拍摄连续性</title><style>body{font:15px system-ui;max-width:1100px;margin:24px auto;padding:0 16px;background:#f3f4f7}section{background:#fff;padding:16px;margin:12px 0;border:1px solid #ddd;border-radius:10px}input,textarea,select,button{padding:7px;margin:3px;border:1px solid #aaa;border-radius:6px}button{background:#4b2d6f;color:#fff}pre{white-space:pre-wrap;max-height:420px;overflow:auto}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid input,.grid textarea{width:90%}</style><h1>影视拍摄连续性管理</h1><section><h2>连续性报告</h2><input id="production" type="number" placeholder="项目 ID"><button onclick="report()">查看报告</button><pre id="state"></pre></section><section><h2>状态与冲突</h2><div class="grid"><input id="scene" type="number" placeholder="场次 ID"><input id="shot" type="number" placeholder="镜头 ID"><input id="element" type="number" placeholder="元素 ID"><input id="user" type="number" placeholder="场记/制片 ID"><input id="value" placeholder="状态值"><input id="numeric" type="number" step="0.1" placeholder="数值"><input id="conflict" type="number" placeholder="冲突 ID"><input id="reviewer" type="number" placeholder="审片人 ID"><input id="reason" placeholder="理由"></div><button onclick="state()">设置状态并检测</button><button onclick="check()">重新检查场次</button><button onclick="lock()">锁定镜头</button><button onclick="exempt()">批准豁免</button><pre id="result"></pre></section><section><h2>调整方案</h2><input id="newvalue" placeholder="新状态"><input id="newnumeric" type="number" step="0.1" placeholder="新数值"><button onclick="propose()">提出方案</button><input id="plan" type="number" placeholder="方案 ID"><button onclick="approve()">批准方案</button><pre id="extra"></pre></section><script>const show=(e,x)=>document.querySelector(e).textContent=JSON.stringify(x,null,2);async function get(u,e='#result'){show(e,await(await fetch(u)).json())}async function post(u,b,e='#result'){show(e,await(await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json())}function report(){get('/api/productions/'+production.value+'/continuity','#state')}function state(){post('/api/shots/'+shot.value+'/states',{element_id:+element.value,state_value:value.value,numeric_value:numeric.value?+numeric.value:null,note:reason.value,user_id:+user.value})}function check(){post('/api/scenes/'+scene.value+'/check',{})}function lock(){post('/api/shots/'+shot.value+'/lock',{user_id:+user.value})}function exempt(){post('/api/conflicts/'+conflict.value+'/exemptions',{reason:reason.value,reviewer_id:+reviewer.value})}function propose(){post('/api/conflicts/'+conflict.value+'/plans',{new_value:newvalue.value,numeric_value:newnumeric.value?+newnumeric.value:null,reason:reason.value,user_id:+user.value})}function approve(){post('/api/plans/'+plan.value+'/review',{approve:true,reviewer_id:+reviewer.value,note:reason.value},'#extra')}report()</script></html>
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>影视拍摄连续性</title><style>body{font:15px system-ui;max-width:1100px;margin:24px auto;padding:0 16px;background:#f3f4f7}section{background:#fff;padding:16px;margin:12px 0;border:1px solid #ddd;border-radius:10px}input,textarea,select,button{padding:7px;margin:3px;border:1px solid #aaa;border-radius:6px}button{background:#4b2d6f;color:#fff}pre{white-space:pre-wrap;max-height:420px;overflow:auto}.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}.grid input,.grid textarea{width:90%}table{border-collapse:collapse;width:100%}td,th{border:1px solid #ddd;padding:4px 8px;text-align:left}.tag{display:inline-block;padding:1px 8px;border-radius:10px;font-size:12px}.locked{background:#eee;color:#555}.planned{background:#e0f2fe;color:#075985}.invalid{background:#fee2e2;color:#991b1b}.retry{background:#fef9c3;color:#854d0e}.conflict{background:#fee2e2;color:#991b1b;border:1px solid #fca5a5;border-radius:8px;padding:8px;margin:6px 0}.okbox{background:#dcfce7;color:#166534;border:1px solid #86efac;border-radius:8px;padding:8px;margin:6px 0}</style><h1>影视拍摄连续性管理</h1>
+<section><h2>连续性报告（叙事顺序）</h2><input id="production" type="number" placeholder="项目 ID"><button onclick="report()">查看报告</button><div id="state"></div></section>
+<section><h2>调整镜头叙事位置</h2><div class="grid">
+<input id="rshot" type="number" placeholder="镜头 ID">
+<input id="rversion" type="number" placeholder="打开编辑时的版本号">
+<input id="rorder" type="number" placeholder="新叙事位置">
+<input id="ruser" type="number" placeholder="场记/制片 ID">
+<input id="rreq" placeholder="请求编号（失败重试沿用）">
+</div><button onclick="reorder()">提交位置调整</button><div id="reorder"></div></section>
+<section><h2>状态与冲突</h2><div class="grid"><input id="scene" type="number" placeholder="场次 ID"><input id="shot" type="number" placeholder="镜头 ID"><input id="element" type="number" placeholder="元素 ID"><input id="user" type="number" placeholder="场记/制片 ID"><input id="value" placeholder="状态值"><input id="numeric" type="number" step="0.1" placeholder="数值"><input id="conflict" type="number" placeholder="冲突 ID"><input id="reviewer" type="number" placeholder="审片人 ID"><input id="reason" placeholder="理由"></div><button onclick="state()">设置状态并检测</button><button onclick="check()">重新检查场次</button><button onclick="lock()">锁定镜头</button><button onclick="exempt()">批准豁免</button><pre id="result"></pre></section>
+<section><h2>调整方案</h2><input id="newvalue" placeholder="新状态"><input id="newnumeric" type="number" step="0.1" placeholder="新数值"><button onclick="propose()">提出方案</button><input id="plan" type="number" placeholder="方案 ID"><button onclick="approve()">批准方案</button><pre id="extra"></pre></section>
+<script>
+const esc=s=>String(s??"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+const show=(e,x)=>document.querySelector(e).textContent=JSON.stringify(x,null,2);
+async function get(u,e='#result'){show(e,await(await fetch(u)).json())}
+async function post(u,b,e='#result'){show(e,await(await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json())}
+function report(){get('/api/productions/'+production.value+'/continuity','#state');renderReport()}
+async function renderReport(){
+  const box=document.querySelector('#state');
+  if(!production.value){box.textContent="";return}
+  const r=await(await fetch('/api/productions/'+production.value+'/continuity')).json();
+  if(r.error){box.textContent="";const pre=document.createElement('pre');pre.textContent=JSON.stringify(r,null,2);box.replaceChildren(pre);return}
+  const h=document.createElement('div');
+  h.innerHTML=`<p><b>${esc(r.production.title)}</b> · 未处理冲突 ${r.open_conflicts} · 已豁免 ${r.exempted_conflicts} · <span class="tag invalid">失效方案 ${r.invalidated_plans}</span></p>`;
+  for(const sc of r.scenes){
+    const sec=document.createElement('div');sec.innerHTML=`<h3>场次 ${esc(sc.scene_number)} ${esc(sc.title)}（叙事顺序）</h3>`;
+    const t=document.createElement('table');
+    t.innerHTML="<tr><th>叙事位置</th><th>镜头</th><th>拍摄顺序</th><th>状态</th><th>版本号</th></tr>"+
+      sc.shots.map(s=>`<tr><td>${s.narrative_order}</td><td>${esc(s.shot_code)}</td><td>${s.shoot_order}</td><td><span class="tag ${s.status}">${s.status==='locked'?'已锁定':'未锁定'}</span></td><td>v${s.version}</td></tr>`).join("");
+    sec.appendChild(t);
+    const open=sc.conflicts.filter(c=>c.active&&c.status==='open');
+    if(open.length){const d=document.createElement('div');d.innerHTML=open.map(c=>`<div class="conflict">冲突 #${c.id}：${esc(c.detail)}（${esc(c.from_shot_code)} → ${esc(c.to_shot_code)}）</div>`).join("");sec.appendChild(d)}
+    const plans=(r.plans||[]).filter(p=>p.scene_id===sc.id);
+    if(plans.length){
+      const pt=document.createElement('table');
+      pt.innerHTML="<tr><th>方案</th><th>冲突</th><th>新状态</th><th>审核</th><th>有效性</th></tr>"+plans.map(p=>`<tr><td>#${p.id}</td><td>#${p.conflict_id}</td><td>${esc(p.new_value)}</td><td>${esc(p.status)}</td><td>${p.invalidated?'<span class="tag invalid">叙事位置变化，已失效</span>':'有效'}</td></tr>`).join("");
+      sec.appendChild(pt);
+    }
+    h.appendChild(sec);
+  }
+  box.replaceChildren(h);
+}
+async function reorder(){
+  const box=document.querySelector('#reorder');box.innerHTML="";
+  const req=rreq.value||("req-"+Date.now());rreq.value=req;
+  const res=await fetch('/api/shots/'+rshot.value+'/reorder',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({narrative_order:+rorder.value,expected_version:+rversion.value,user_id:+ruser.value,request_id:req})});
+  const data=await res.json();
+  if(res.status===409){box.innerHTML=`<div class="conflict"><b>版本冲突（HTTP 409）：</b>${esc(data.detail||data.error)}<br>另一终端已先提交，请按当前顺序和版本号刷新后重新调整。<br><small>请求编号 ${esc(req)} 未写入任何变化，可在刷新后复用该编号重试。</small></div>`;return}
+  if(!data.ok){const pre=document.createElement('pre');pre.textContent=JSON.stringify(data,null,2);box.replaceChildren(pre);return}
+  const d=document.createElement('div');
+  d.innerHTML=`<div class="okbox"><b>${data.retried?'重试成功（幂等返回首次结果）':'提交成功'}</b> · 请求编号 ${esc(data.request_id)} · 第 ${data.attempt} 次到达 · 镜头新版本 v${data.version}<br>`+
+    (data.invalidated_plan_ids.length?`<span class="tag invalid">失效方案：${data.invalidated_plan_ids.map(x=>'#'+x).join('、')||'无'}</span> `:'')+
+    (data.invalidated_conflict_ids.length?`<span class="tag invalid">失效冲突：${data.invalidated_conflict_ids.map(x=>'#'+x).join('、')}</span> `:'')+
+    (data.unlocked_shot_ids.length?`<span class="tag planned">旧锁定结论失效，重新解锁镜头：${data.unlocked_shot_ids.join('、')}</span>`:'')+
+    `</div><table><tr><th>叙事位置</th><th>镜头</th><th>状态</th><th>版本</th></tr>`+
+    data.narrative_order.map(s=>`<tr><td>${s.narrative_order}</td><td>${esc(s.shot_code)}</td><td>${s.status==='locked'?'已锁定':'未锁定'}</td><td>v${s.version}</td></tr>`).join("")+
+    `</table><div class="retry">检测到冲突 ${data.conflicts.length} 个（已按新叙事顺序重算）</div>`;
+  box.replaceChildren(d);renderReport();
+}
+function state(){post('/api/shots/'+shot.value+'/states',{element_id:+element.value,state_value:value.value,numeric_value:numeric.value?+numeric.value:null,note:reason.value,user_id:+user.value}).then(renderReport)}
+function check(){post('/api/scenes/'+scene.value+'/check',{}).then(renderReport)}
+function lock(){post('/api/shots/'+shot.value+'/lock',{user_id:+user.value}).then(renderReport)}
+function exempt(){post('/api/conflicts/'+conflict.value+'/exemptions',{reason:reason.value,reviewer_id:+reviewer.value}).then(renderReport)}
+function propose(){post('/api/conflicts/'+conflict.value+'/plans',{new_value:newvalue.value,numeric_value:newnumeric.value?+newnumeric.value:null,reason:reason.value,user_id:+user.value})}
+function approve(){post('/api/plans/'+plan.value+'/review',{approve:true,reviewer_id:+reviewer.value,note:reason.value},'#extra').then(renderReport)}
+renderReport();
+</script></html>

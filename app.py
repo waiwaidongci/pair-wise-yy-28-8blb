@@ -3,7 +3,7 @@ import json, os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
-from database import ContinuityDB, DomainError
+from database import ContinuityDB, DomainError, VersionConflict
 
 BASE=Path(__file__).resolve().parent; DB_PATH=os.environ.get("CONTINUITY_DB",str(BASE/"continuity.db"))
 class Handler(BaseHTTPRequestHandler):
@@ -38,12 +38,14 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts)==4 and parts[:2]==["api","scenes"] and parts[3]=="shots": return self._json(201,{"ok":True,"id":self.db.add_shot(int(parts[2]),str(b.get("shot_code","")),int(b.get("shoot_order",0)),int(b.get("narrative_order",0)),str(b.get("description","")),int(b.get("user_id",0)))})
             if len(parts)==4 and parts[:2]==["api","scenes"] and parts[3]=="check": return self._json(200,{"ok":True,"conflicts":self.db.check_scene(int(parts[2]))})
             if len(parts)==4 and parts[:2]==["api","shots"] and parts[3]=="states": return self._json(200,{"ok":True,**self.db.set_element_state(int(parts[2]),int(b.get("element_id",0)),str(b.get("state_value","")),b.get("numeric_value"),str(b.get("note","")),int(b.get("user_id",0)))})
+            if len(parts)==4 and parts[:2]==["api","shots"] and parts[3]=="reorder": return self._json(200,{"ok":True,**self.db.reorder_shot(int(parts[2]),int(b.get("narrative_order",0)),b.get("expected_version"),int(b.get("user_id",0)),str(b.get("request_id","")))})
             if len(parts)==4 and parts[:2]==["api","shots"] and parts[3]=="lock": self.db.lock_shot(int(parts[2]),int(b.get("user_id",0))); return self._json(200,{"ok":True})
             if len(parts)==4 and parts[:2]==["api","elements"] and parts[3]=="transitions": return self._json(201,{"ok":True,"id":self.db.add_transition(int(parts[2]),str(b.get("from_state","")),str(b.get("to_state","")),str(b.get("note","")))})
             if len(parts)==4 and parts[:2]==["api","conflicts"] and parts[3]=="plans": return self._json(201,{"ok":True,"id":self.db.propose_adjustment(int(parts[2]),str(b.get("new_value","")),b.get("numeric_value"),str(b.get("reason","")),int(b.get("user_id",0)))})
             if len(parts)==4 and parts[:2]==["api","conflicts"] and parts[3]=="exemptions": return self._json(201,{"ok":True,"id":self.db.approve_exemption(int(parts[2]),str(b.get("reason","")),int(b.get("reviewer_id",0)))})
             if len(parts)==4 and parts[:2]==["api","plans"] and parts[3]=="review": return self._json(200,{"ok":True,**self.db.review_adjustment(int(parts[2]),bool(b.get("approve",False)),int(b.get("reviewer_id",0)),str(b.get("note","")))})
             self._json(404,{"ok":False,"error":"接口不存在"})
+        except VersionConflict as exc: self._json(409,{"ok":False,"error":"版本冲突","detail":str(exc)})
         except (DomainError,ValueError) as exc: self._json(400,{"ok":False,"error":str(exc)})
 def main():
     ContinuityDB(DB_PATH).seed_demo(); port=int(os.environ.get("PORT","8115")); print(f"Film continuity service: http://127.0.0.1:{port}"); ThreadingHTTPServer(("0.0.0.0",port),Handler).serve_forever()

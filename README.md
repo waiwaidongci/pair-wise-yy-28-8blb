@@ -27,7 +27,17 @@ python -m unittest discover -s tests -v
 - `POST /api/productions/{id}/scenes`、`POST /api/scenes/{id}/shots`
 - `POST /api/productions/{id}/elements`、`POST /api/elements/{id}/transitions`
 - `POST /api/shots/{id}/states`、`POST /api/scenes/{id}/check`
+- `POST /api/shots/{id}/reorder` — 调整未锁定镜头的叙事顺序，按新顺序重算冲突
 - `POST /api/conflicts/{id}/plans`、`POST /api/plans/{id}/review`
 - `POST /api/conflicts/{id}/exemptions`
 - `POST /api/shots/{id}/lock`
 - `GET /api/productions/{id}/continuity`
+
+## 并发提交与重试
+
+所有写入接口（`states`、`reorder`、`lock`）都支持两个字段：
+
+- `version`：场记打开编辑时镜头的版本号。提交时若与当前版本不一致，返回 `409` 并提示版本冲突，后到的终端需刷新后基于最新版本重试。两个终端同时提交同一场次时，先到的一次生效，后到的收到版本冲突。
+- `request_id`：请求编号。写入失败后重试沿用同一编号，服务端幂等回放已成功的写入，不会重复应用（版本号只增一次）；失败的写入整体回滚，场次、镜头、元素状态和冲突不留半套变化。
+
+调序会按新叙事顺序重算受影响元素的冲突，旧冲突对应的调整方案随即标记为 `voided`（失效），此前的锁定结论也会失效——镜头解锁，需重新检查后再锁定。页面会显示当前叙事顺序、失效的方案和重试结果。
